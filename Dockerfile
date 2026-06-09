@@ -2,9 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+# Копируем ВСЕ файлы проекта
+COPY . /app
+
+# Устанавливаем зависимости
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
-
+# Запускаем бота
 CMD ["python", "bot.py"]
