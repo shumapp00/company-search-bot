@@ -89,9 +89,9 @@ quantity_kb = types.ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ========== ПОИСКОВЫЙ ДВИЖОК С DUCKDUCKGO ==========
+# ========== ПОИСКОВЫЙ ДВИЖОК С ПАРСИНГОМ САЙТОВ ==========
 class SearchEngineRF:
-    """Поиск компаний через Яндекс.Карты, 2GIS и DuckDuckGo"""
+    """Поиск компаний через Яндекс.Карты, 2GIS и парсинг сайтов"""
 
     @staticmethod
     def _normalize_phone(phone: str) -> str:
@@ -120,25 +120,34 @@ class SearchEngineRF:
         return ""
 
     @staticmethod
-    def _extract_website_from_text(text: str) -> str:
-        """Ищет сайт в тексте"""
-        if not text:
+    def _parse_website_for_phone(website: str) -> str:
+        """Заходит на сайт компании и ищет телефон"""
+        if not website:
             return ""
-        # Ищем https://domain.com
-        match = re.search(r'https?://([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', text)
-        if match:
-            return match.group(1)
-        # Ищем просто domain.ru
-        match2 = re.search(r'([a-zA-Z0-9-]+\.(ru|com|net|org|info|biz|pro))', text, re.IGNORECASE)
-        if match2:
-            return match2.group(1)
-        return ""
+        if not website.startswith("http"):
+            website = "https://" + website
+        
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            resp = requests.get(website, headers=headers, timeout=10)
+            text = resp.text
+            
+            # Ищем телефон в HTML
+            phone = SearchEngineRF._extract_phone_from_text(text)
+            if phone:
+                print(f"   ✓ Найден телефон на сайте: {phone}")
+                return phone
+            
+            return ""
+        except Exception as e:
+            print(f"   ⚠️ Ошибка парсинга сайта: {e}")
+            return ""
 
     @staticmethod
     def search_duckduckgo(city: str, niche: str, quantity: int) -> List[Dict]:
-        """
-        Поиск через DuckDuckGo - находит телефоны и сайты
-        """
+        """Поиск через DuckDuckGo"""
         query = f"{niche} {city} телефон"
         
         try:
@@ -161,18 +170,17 @@ class SearchEngineRF:
                     if any(d in href.lower() for d in skip_domains):
                         continue
                     
-                    # Ищем телефон в заголовке и описании
+                    # Ищем телефон
                     full_text = title + " " + body
                     phone = SearchEngineRF._extract_phone_from_text(full_text)
                     
                     # Ищем сайт
-                    website = SearchEngineRF._extract_website_from_text(href)
-                    if not website:
-                        website = SearchEngineRF._extract_website_from_text(full_text)
+                    website = ""
+                    if href and not any(d in href.lower() for d in skip_domains):
+                        website = href.replace("https://", "").replace("http://", "").split("/")[0]
                     
-                    # Если нашли телефон или сайт - добавляем
+                    # Если нашли телефон или сайт
                     if phone or website:
-                        # Очищаем название
                         name = title.split("—")[0].split("-")[0].split("|")[0].strip()
                         if len(name) > 80:
                             name = name[:80]
@@ -188,7 +196,7 @@ class SearchEngineRF:
                         if len(companies) >= quantity:
                             break
             
-            print(f"✓ DuckDuckGo: найдено {len(companies)} с телефонами/сайтами")
+            print(f"✓ DuckDuckGo: найдено {len(companies)}")
             return companies
             
         except Exception as e:
@@ -197,7 +205,7 @@ class SearchEngineRF:
 
     @staticmethod
     def search_yandex_maps(city: str, niche: str, quantity: int) -> List[Dict]:
-        """Поиск через Яндекс.Карты API (базовые данные)"""
+        """Поиск через Яндекс.Карты API"""
         if not YANDEX_MAPS_API_KEY:
             return []
 
@@ -342,47 +350,54 @@ class SearchEngineRF:
     def search_all(cls, city: str, niche: str, quantity: int) -> List[Dict]:
         """
         Комбинированный поиск:
-        1. DuckDuckGo - телефоны и сайты
-        2. Yandex Maps - название и адрес
-        3. 2GIS - запасной
+        1. Yandex Maps - название, адрес
+        2. DuckDuckGo - телефон, сайт
+        3. Парсинг сайтов - если нет телефона
+        4. 2GIS - запасной
         """
         results = []
         seen_names = set()
 
-        # 1. DuckDuckGo - ищем телефоны и сайты
-        print(f"🔍 DuckDuckGo: ищу {niche} в {city}...")
+        # 1. Yandex Maps - базовые данные
+        yandex_maps = cls.search_yandex_maps(city, niche, quantity)
+        for c in yandex_maps:
+            name_lower = c["business_name"].lower()
+            if name_lower not in seen_names:
+                seen_names.add(name_lower)
+                results.append(c)
+
+        # 2. DuckDuckGo - телефоны и сайты
+        print(f"🔍 DuckDuckGo: ищу телефоны...")
         duck_results = cls.search_duckduckgo(city, niche, quantity)
         
         for duck in duck_results:
-            name_lower = duck["business_name"].lower()
-            if name_lower not in seen_names:
-                seen_names.add(name_lower)
+            # Проверяем, есть ли уже такая компания
+            found = False
+            for existing in results:
+                if duck["business_name"].lower() in existing["business_name"].lower() or \
+                   existing["business_name"].lower() in duck["business_name"].lower():
+                    # Дополняем
+                    if not existing.get("phone") and duck.get("phone"):
+                        existing["phone"] = duck["phone"]
+                    if not existing.get("website") and duck.get("website"):
+                        existing["website"] = duck["website"]
+                    found = True
+                    break
+            
+            if not found and len(results) < quantity:
+                seen_names.add(duck["business_name"].lower())
                 results.append(duck)
 
-        # 2. Yandex Maps - добавляем адреса
-        if len(results) < quantity:
-            print(f"🔍 Yandex Maps: ищу дополнительно...")
-            yandex_maps = cls.search_yandex_maps(city, niche, quantity)
-            
-            for ym in yandex_maps:
-                name_lower = ym["business_name"].lower()
-                
-                # Ищем, есть ли уже такая компания
-                found = False
-                for existing in results:
-                    if name_lower in existing["business_name"].lower() or \
-                       existing["business_name"].lower() in name_lower:
-                        # Дополняем адресом
-                        if not existing.get("address") and ym.get("address"):
-                            existing["address"] = ym["address"]
-                        found = True
-                        break
-                
-                if not found and len(results) < quantity:
-                    seen_names.add(name_lower)
-                    results.append(ym)
+        # 3. Парсинг сайтов - если нет телефона
+        print(f"🔍 Парсинг сайтов для телефонов...")
+        for company in results:
+            if not company.get("phone") and company.get("website"):
+                print(f"   Парсинг: {company['website']}")
+                phone = cls._parse_website_for_phone(company["website"])
+                if phone:
+                    company["phone"] = phone
 
-        # 3. 2GIS - если всё ещё мало
+        # 4. 2GIS - если всё ещё мало
         if len(results) < quantity:
             print(f"🔍 2GIS: ищу запасной вариант...")
             need_more = quantity - len(results)
@@ -455,8 +470,9 @@ async def start(message: types.Message, state: FSMContext):
     await message.answer(
         "👋 <b>Бот поиска компаний</b>\n\n"
         "🔍 Я ищу реальные компании через:\n"
-        "   • DuckDuckGo (телефоны, сайты)\n"
         "   • Яндекс.Карты (адреса)\n"
+        "   • DuckDuckGo (телефоны, сайты)\n"
+        "   • Парсинг сайтов (телефоны)\n"
         "   • 2GIS (запасной)\n\n"
         "📊 Собираю: телефоны, сайты, адреса\n\n"
         "<b>Выберите действие:</b>",
@@ -470,7 +486,7 @@ async def start_parsing(message: types.Message, state: FSMContext):
     await state.set_state(Form.waiting_for_city)
     await message.answer(
         "🏙️ Введите <b>город</b>:\n"
-        "<i>Например: Москва, Санкт-Петербург, Казань</i>",
+        "<i>Например: Москва, Санкт-Петербург, Ставрополь</i>",
         parse_mode="HTML"
     )
 
@@ -521,7 +537,8 @@ async def get_quantity(message: types.Message, state: FSMContext):
         f"🏙️ Город: {city}\n"
         f"📌 Ниша: {niche}\n"
         f"📊 Количество: {quantity}\n"
-        f"⏳ Это займёт 20-30 секунд",
+        f"⏳ Это займёт 30-60 секунд\n"
+        f"<i>(парсинг сайтов может занять время)</i>",
         parse_mode="HTML"
     )
 
@@ -532,9 +549,9 @@ async def get_quantity(message: types.Message, state: FSMContext):
             await msg.edit_text(
                 "❌ <b>Ничего не найдено</b>\n\n"
                 "💡 Попробуйте:\n"
-                "• Проверить название города (Москва, а не мск)\n"
-                "• Упростить нишу (кафе вместо 'кофейня с круассанами')\n"
-                "• Попробовать позже (DuckDuckGo может быть недоступен)",
+                "• Проверить название города\n"
+                "• Упростить нишу (стоматология вместо 'лечение зубов')\n"
+                "• Попробовать позже",
                 parse_mode="HTML"
             )
             return
