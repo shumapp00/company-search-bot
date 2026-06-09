@@ -30,7 +30,6 @@ YANDEX_MAPS_API_KEY = os.getenv("YANDEX_MAPS_API_KEY")
 TWOGIS_API_KEY = os.getenv("TWOGIS_API_KEY", "rujrdl8776")
 
 # ========== GOOGLE SHEETS ==========
-# Для Render: если ключ передан как текст в переменной окружения
 google_key_content = os.getenv("GOOGLE_KEY_JSON")
 if google_key_content:
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -90,9 +89,9 @@ quantity_kb = types.ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ========== ПОИСКОВЫЙ ДВИЖОК ==========
+# ========== ПОИСКОВЫЙ ДВИЖОК С ПАРСИНГОМ САЙТОВ ==========
 class SearchEngineRF:
-    """Поиск компаний через Яндекс.Карты и 2GIS"""
+    """Поиск компаний через Яндекс.Карты и 2GIS + парсинг сайтов"""
 
     @staticmethod
     def _normalize_phone(phone: str) -> str:
@@ -103,6 +102,43 @@ class SearchEngineRF:
         if digits.startswith('7') and len(digits) == 11:
             return f"+{digits}"
         return phone
+
+    @staticmethod
+    def _parse_phone_from_site(url: str) -> str:
+        """Парсит телефон с сайта компании"""
+        if not url:
+            return ""
+        if not url.startswith("http"):
+            url = "https://" + url
+        
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            resp = requests.get(url, headers=headers, timeout=10)
+            text = resp.text
+            
+            # Ищем телефоны в разных форматах
+            patterns = [
+                r'\+7[\s\(\)-]*\d{3}[\s\(\)-]*\d{3}[\s\(\)-]*\d{2}[\s\(\)-]*\d{2}',
+                r'8[\s\(\)-]*\d{3}[\s\(\)-]*\d{3}[\s\(\)-]*\d{2}[\s\(\)-]*\d{2}',
+                r'7[\s\(\)-]*\d{3}[\s\(\)-]*\d{3}[\s\(\)-]*\d{2}[\s\(\)-]*\d{2}',
+                r'тел[.\s]*[:]*[\s]*([+\d\s\(\)-]{10,20})',
+                r'phone[.\s]*[:]*[\s]*([+\d\s\(\)-]{10,20})'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    phone = match.group(1) if '(' in pattern else match.group(0)
+                    normalized = SearchEngineRF._normalize_phone(phone)
+                    if normalized and len(normalized) > 10:
+                        return normalized
+            
+            return ""
+        except Exception as e:
+            print(f"⚠️ Ошибка парсинга сайта {url}: {e}")
+            return ""
 
     @staticmethod
     def search_yandex_maps(city: str, niche: str, quantity: int) -> List[Dict]:
@@ -134,7 +170,7 @@ class SearchEngineRF:
 
             lon, lat = coords
 
-            # 2. Ищем организации рядом
+            # 2. Ищем организации
             search_url = "https://search-maps.yandex.ru/v1/"
             search_params = {
                 "apikey": YANDEX_MAPS_API_KEY,
@@ -257,14 +293,12 @@ class SearchEngineRF:
     @classmethod
     def search_all(cls, city: str, niche: str, quantity: int) -> List[Dict]:
         """
-        Комбинированный поиск:
-        1. Сначала Яндекс.Карты (точнее)
-        2. Потом 2GIS (запасной)
+        Комбинированный поиск + парсинг сайтов для телефонов
         """
         results = []
         seen_names = set()
 
-        # Пробуем Яндекс.Карты
+        # 1. Яндекс.Карты (самый точный)
         yandex_maps = cls.search_yandex_maps(city, niche, quantity)
         for c in yandex_maps:
             name_lower = c["business_name"].lower()
@@ -272,7 +306,7 @@ class SearchEngineRF:
                 seen_names.add(name_lower)
                 results.append(c)
 
-        # Если мало — добавляем 2GIS
+        # 2. 2GIS (если мало)
         if len(results) < quantity:
             need_more = quantity - len(results)
             twogis = cls.search_2gis(city, niche, need_more)
@@ -282,6 +316,16 @@ class SearchEngineRF:
                     seen_names.add(name_lower)
                     results.append(c)
 
+        # 3. Дополняем данные с сайтов компаний (если нет телефона)
+        print(f"🔍 Парсинг сайтов для {len(results)} компаний...")
+        for company in results:
+            if not company.get("phone") and company.get("website"):
+                print(f"   Парсим: {company['website']}")
+                phone_from_site = cls._parse_phone_from_site(company["website"])
+                if phone_from_site:
+                    company["phone"] = phone_from_site
+                    print(f"   ✓ Найден телефон: {phone_from_site}")
+
         return results[:quantity]
 
 # ========== ФУНКЦИИ СОХРАНЕНИЯ ==========
@@ -289,7 +333,6 @@ def save_to_google(city: str, niche: str, companies: List[Dict]) -> bool:
     """Сохраняет в Google Таблицу"""
     global sheet
     if sheet is None:
-        print("⚠️ Google Sheets не подключен")
         return False
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -344,7 +387,8 @@ async def start(message: types.Message, state: FSMContext):
         "👋 <b>Бот поиска компаний</b>\n\n"
         "🔍 Я ищу реальные компании через:\n"
         "   • Яндекс.Карты\n"
-        "   • 2GIS\n\n"
+        "   • 2GIS\n"
+        "   • Парсинг сайтов компаний\n\n"
         "📊 Собираю: телефоны, сайты, адреса\n\n"
         "<b>Выберите действие:</b>",
         reply_markup=main_kb,
@@ -411,7 +455,8 @@ async def get_quantity(message: types.Message, state: FSMContext):
         f"🏙️ Город: {city}\n"
         f"📌 Ниша: {niche}\n"
         f"📊 Количество: {quantity}\n"
-        f"⏳ Это займёт 15-30 секунд",
+        f"⏳ Это займёт 20-40 секунд\n"
+        f"<i>(парсинг сайтов может занять время)</i>",
         parse_mode="HTML"
     )
 
@@ -581,7 +626,6 @@ async def run_web():
     runner = web.AppRunner(app)
     await runner.setup()
 
-    # Render сам назначает порт через переменную PORT
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
 
