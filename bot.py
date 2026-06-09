@@ -89,9 +89,9 @@ quantity_kb = types.ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ========== ПОИСКОВЫЙ ДВИЖОК С ПАРСИНГОМ САЙТОВ ==========
+# ========== ПОИСКОВЫЙ ДВИЖОК С ПАРСИНГОМ ЯНДЕКС КАРТ ==========
 class SearchEngineRF:
-    """Поиск компаний через Яндекс.Карты, 2GIS и парсинг сайтов"""
+    """Поиск компаний через парсинг Яндекс.Карт и 2GIS"""
 
     @staticmethod
     def _normalize_phone(phone: str) -> str:
@@ -120,92 +120,119 @@ class SearchEngineRF:
         return ""
 
     @staticmethod
-    def _parse_website_for_phone(website: str) -> str:
-        """Заходит на сайт компании и ищет телефон"""
-        if not website:
-            return ""
-        if not website.startswith("http"):
-            website = "https://" + website
-        
+    def _parse_yandex_maps_html(city: str, niche: str, quantity: int) -> List[Dict]:
+        """
+        Парсит Яндекс.Карты через HTML (как браузер)
+        Там видны телефоны и сайты!
+        """
         try:
+            # Формируем URL поиска
+            query = f"{niche} {city}"
+            url = f"https://yandex.ru/maps/search/{requests.utils.quote(query)}"
+            
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Referer": "https://yandex.ru/"
             }
-            resp = requests.get(website, headers=headers, timeout=10)
-            text = resp.text
             
-            # Ищем телефон в HTML
-            phone = SearchEngineRF._extract_phone_from_text(text)
-            if phone:
-                print(f"   ✓ Найден телефон на сайте: {phone}")
-                return phone
-            
-            return ""
-        except Exception as e:
-            print(f"   ⚠️ Ошибка парсинга сайта: {e}")
-            return ""
-
-    @staticmethod
-    def search_duckduckgo(city: str, niche: str, quantity: int) -> List[Dict]:
-        """Поиск через DuckDuckGo"""
-        query = f"{niche} {city} телефон"
-        
-        try:
-            from duckduckgo_search import DDGS
+            print(f"🔍 Парсинг Яндекс.Карты: {url}")
+            resp = requests.get(url, headers=headers, timeout=20)
+            html = resp.text
             
             companies = []
-            with DDGS() as ddgs:
-                results = ddgs.text(query, max_results=quantity * 3)
-                
-                for r in results:
-                    title = r.get("title", "")
-                    body = r.get("body", "")
-                    href = r.get("href", "")
-                    
-                    # Пропускаем агрегаторы
-                    skip_domains = ["zoon.ru", "yell.ru", "2gis.ru", "yandex.ru", 
-                                   "google.com", "tripadvisor", "instagram", "facebook",
-                                   "vk.com", "ok.ru", "youtube.com"]
-                    
-                    if any(d in href.lower() for d in skip_domains):
-                        continue
-                    
-                    # Ищем телефон
-                    full_text = title + " " + body
-                    phone = SearchEngineRF._extract_phone_from_text(full_text)
-                    
-                    # Ищем сайт
-                    website = ""
-                    if href and not any(d in href.lower() for d in skip_domains):
-                        website = href.replace("https://", "").replace("http://", "").split("/")[0]
-                    
-                    # Если нашли телефон или сайт
-                    if phone or website:
-                        name = title.split("—")[0].split("-")[0].split("|")[0].strip()
-                        if len(name) > 80:
-                            name = name[:80]
+            
+            # Ищем организации в HTML через регулярки
+            # Паттерн 1: Название организации
+            name_patterns = [
+                r'"name":"([^"]+)"',  # JSON в HTML
+                r'<h1[^>]*>([^<<]+)</h1>',
+                r'class="[^"]*card-title[^"]*"[^>]*>([^<<]+)'
+            ]
+            
+            # Паттерн 2: Телефон
+            phone_patterns = [
+                r'"phone":"([^"]+)"',
+                r'tel:([^"]+)"',
+                r'\+7[\s\(\)-]*\d{3}[\s\(\)-]*\d{3}[\s\(\)-]*\d{2}[\s\(\)-]*\d{2}'
+            ]
+            
+            # Паттерн 3: Адрес
+            address_patterns = [
+                r'"address":"([^"]+)"',
+                r'class="[^"]*address[^"]*"[^>]*>([^<<]+)'
+            ]
+            
+            # Паттерн 4: Сайт
+            website_patterns = [
+                r'"url":"([^"]+)"',
+                r'href="https?://([^"/]+)'
+            ]
+            
+            # Ищем блоки с организациями
+            # Яндекс хранит данные в JSON внутри HTML
+            json_blocks = re.findall(r'window\.__INITIAL_STATE__\s*=\s*({.+?});', html)
+            if json_blocks:
+                try:
+                    data = json.loads(json_blocks[0])
+                    # Парсим JSON структуру
+                    orgs = data.get('search', {}).get('results', {}).get('items', [])
+                    for org in orgs[:quantity]:
+                        name = org.get('name', '')
+                        if not name:
+                            continue
+                        
+                        phones = org.get('phones', [])
+                        phone = phones[0].get('formatted', '') if phones else ''
+                        
+                        address = org.get('address', '')
+                        website = org.get('url', '')
                         
                         companies.append({
                             "business_name": name,
                             "website": website,
                             "social": "",
-                            "phone": phone,
-                            "address": ""
+                            "phone": SearchEngineRF._normalize_phone(phone),
+                            "address": address
                         })
                         
                         if len(companies) >= quantity:
                             break
+                except:
+                    pass
             
-            print(f"✓ DuckDuckGo: найдено {len(companies)}")
+            # Если JSON не сработал, ищем в HTML напрямую
+            if not companies:
+                # Ищем карточки организаций
+                cards = re.findall(r'class="search-snippet-view__body"[^>]*>(.*?)</div>', html, re.DOTALL)
+                for card in cards[:quantity]:
+                    name = re.search(r'class="search-business-snippet-view__title"[^>]*>([^<<]+)', card)
+                    phone = re.search(r'\+7[\s\(\)-]*\d{3}[\s\(\)-]*\d{3}[\s\(\)-]*\d{2}[\s\(\)-]*\d{2}', card)
+                    address = re.search(r'class="search-business-snippet-view__address"[^>]*>([^<<]+)', card)
+                    
+                    if name:
+                        companies.append({
+                            "business_name": name.group(1).strip(),
+                            "website": "",
+                            "social": "",
+                            "phone": SearchEngineRF._normalize_phone(phone.group(0)) if phone else "",
+                            "address": address.group(1).strip() if address else ""
+                        })
+                    
+                    if len(companies) >= quantity:
+                        break
+            
+            print(f"✓ Яндекс.Карты HTML: найдено {len(companies)}")
             return companies
             
         except Exception as e:
-            print(f"⚠️ DuckDuckGo error: {e}")
+            print(f"⚠️ Яндекс.Карты HTML error: {e}")
             return []
 
     @staticmethod
-    def search_yandex_maps(city: str, niche: str, quantity: int) -> List[Dict]:
-        """Поиск через Яндекс.Карты API"""
+    def search_yandex_maps_api(city: str, niche: str, quantity: int) -> List[Dict]:
+        """Поиск через Яндекс.Карты API (базовые данные)"""
         if not YANDEX_MAPS_API_KEY:
             return []
 
@@ -269,11 +296,11 @@ class SearchEngineRF:
                 if len(companies) >= quantity:
                     break
 
-            print(f"✓ Yandex Maps: найдено {len(companies)}")
+            print(f"✓ Yandex Maps API: найдено {len(companies)}")
             return companies
 
         except Exception as e:
-            print(f"⚠️ Yandex Maps error: {e}")
+            print(f"⚠️ Yandex Maps API error: {e}")
             return []
 
     @staticmethod
@@ -350,56 +377,51 @@ class SearchEngineRF:
     def search_all(cls, city: str, niche: str, quantity: int) -> List[Dict]:
         """
         Комбинированный поиск:
-        1. Yandex Maps - название, адрес
-        2. DuckDuckGo - телефон, сайт
-        3. Парсинг сайтов - если нет телефона
-        4. 2GIS - запасной
+        1. Парсинг Яндекс.Карт HTML (телефоны, сайты)
+        2. Yandex Maps API (адреса)
+        3. 2GIS (запасной)
         """
         results = []
         seen_names = set()
 
-        # 1. Yandex Maps - базовые данные
-        yandex_maps = cls.search_yandex_maps(city, niche, quantity)
-        for c in yandex_maps:
+        # 1. Парсинг Яндекс.Карты HTML (самый эффективный для телефонов)
+        print(f"🔍 Парсинг Яндекс.Карты HTML...")
+        yandex_html = cls._parse_yandex_maps_html(city, niche, quantity)
+        
+        for c in yandex_html:
             name_lower = c["business_name"].lower()
             if name_lower not in seen_names:
                 seen_names.add(name_lower)
                 results.append(c)
 
-        # 2. DuckDuckGo - телефоны и сайты
-        print(f"🔍 DuckDuckGo: ищу телефоны...")
-        duck_results = cls.search_duckduckgo(city, niche, quantity)
-        
-        for duck in duck_results:
-            # Проверяем, есть ли уже такая компания
-            found = False
-            for existing in results:
-                if duck["business_name"].lower() in existing["business_name"].lower() or \
-                   existing["business_name"].lower() in duck["business_name"].lower():
-                    # Дополняем
-                    if not existing.get("phone") and duck.get("phone"):
-                        existing["phone"] = duck["phone"]
-                    if not existing.get("website") and duck.get("website"):
-                        existing["website"] = duck["website"]
-                    found = True
-                    break
-            
-            if not found and len(results) < quantity:
-                seen_names.add(duck["business_name"].lower())
-                results.append(duck)
-
-        # 3. Парсинг сайтов - если нет телефона
-        print(f"🔍 Парсинг сайтов для телефонов...")
-        for company in results:
-            if not company.get("phone") and company.get("website"):
-                print(f"   Парсинг: {company['website']}")
-                phone = cls._parse_website_for_phone(company["website"])
-                if phone:
-                    company["phone"] = phone
-
-        # 4. 2GIS - если всё ещё мало
+        # 2. Yandex Maps API - дополняем адресами
         if len(results) < quantity:
-            print(f"🔍 2GIS: ищу запасной вариант...")
+            print(f"🔍 Yandex Maps API...")
+            yandex_api = cls.search_yandex_maps_api(city, niche, quantity)
+            
+            for api in yandex_api:
+                name_lower = api["business_name"].lower()
+                
+                # Ищем, есть ли уже
+                found = False
+                for existing in results:
+                    if name_lower in existing["business_name"].lower() or \
+                       existing["business_name"].lower() in name_lower:
+                        # Дополняем
+                        if not existing.get("address") and api.get("address"):
+                            existing["address"] = api["address"]
+                        if not existing.get("phone") and api.get("phone"):
+                            existing["phone"] = api["phone"]
+                        found = True
+                        break
+                
+                if not found and len(results) < quantity:
+                    seen_names.add(name_lower)
+                    results.append(api)
+
+        # 3. 2GIS - если всё ещё мало
+        if len(results) < quantity:
+            print(f"🔍 2GIS...")
             need_more = quantity - len(results)
             twogis = cls.search_2gis(city, niche, need_more)
             
@@ -410,6 +432,9 @@ class SearchEngineRF:
                     results.append(tg)
 
         print(f"✓ Итого: {len(results)} компаний")
+        for i, c in enumerate(results, 1):
+            print(f"   {i}. {c['business_name'][:40]} | 📞 {c.get('phone','нет')} | 🌐 {c.get('website','нет')[:30]}")
+        
         return results[:quantity]
 
 # ========== ФУНКЦИИ СОХРАНЕНИЯ ==========
@@ -470,10 +495,9 @@ async def start(message: types.Message, state: FSMContext):
     await message.answer(
         "👋 <b>Бот поиска компаний</b>\n\n"
         "🔍 Я ищу реальные компании через:\n"
-        "   • Яндекс.Карты (адреса)\n"
-        "   • DuckDuckGo (телефоны, сайты)\n"
-        "   • Парсинг сайтов (телефоны)\n"
-        "   • 2GIS (запасной)\n\n"
+        "   • Яндекс.Карты (парсинг HTML)\n"
+        "   • Яндекс.Карты API\n"
+        "   • 2GIS\n\n"
         "📊 Собираю: телефоны, сайты, адреса\n\n"
         "<b>Выберите действие:</b>",
         reply_markup=main_kb,
@@ -538,7 +562,7 @@ async def get_quantity(message: types.Message, state: FSMContext):
         f"📌 Ниша: {niche}\n"
         f"📊 Количество: {quantity}\n"
         f"⏳ Это займёт 30-60 секунд\n"
-        f"<i>(парсинг сайтов может занять время)</i>",
+        f"<i>(парсинг Яндекс.Карт...)</i>",
         parse_mode="HTML"
     )
 
